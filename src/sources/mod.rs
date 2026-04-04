@@ -6,13 +6,18 @@ pub use lrclib::LrcLibSource;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use id3::Tag;
+use lofty::{properties::FileProperties, tag::Tag};
 use std::sync::Arc;
 
 #[async_trait]
 pub trait LyricsSource: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn fetch_lyrics(&self, tag: &Tag, allow_inaccurate: bool) -> Result<String>;
+    async fn fetch_lyrics(
+        &self,
+        tag: &Tag,
+        properties: &FileProperties,
+        allow_inaccurate: bool,
+    ) -> Result<String>;
 }
 
 pub async fn create_source(name: &str) -> Result<Arc<dyn LyricsSource>> {

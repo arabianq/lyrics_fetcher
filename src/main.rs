@@ -1,5 +1,9 @@
 mod sources;
 
+use lofty::{
+    file::{AudioFile, TaggedFileExt},
+    tag::TagExt,
+};
 use sources::*;
 
 use anyhow::Result;
@@ -16,7 +20,8 @@ use tokio::sync::Semaphore;
 
 use clap::Parser;
 
-use id3::{Tag, TagLike, Version, frame::Lyrics};
+use id3::{TagLike, Version};
+use lofty::{config::WriteOptions, tag::ItemKey};
 
 #[derive(Parser)]
 struct Args {
@@ -175,28 +180,44 @@ async fn process_file(
     overwrite: bool,
     allow_inaccurate: bool,
 ) {
-    let mut tag = match Tag::async_read_from_path(file_path).await {
-        Ok(tag) => tag,
+    let mut tagged_file = match lofty::read_from_path(&file_path) {
+        Ok(file) => file,
         Err(e) => {
+            eprintln!("[ERROR] Failed to read '{}': {}", file_path.display(), e);
+            return;
+        }
+    };
+
+    let search_tag = match tagged_file.primary_tag().or(tagged_file.first_tag()) {
+        Some(t) => t.clone(),
+        None => {
             eprintln!(
-                "[ERROR] Failed to read ID3 tag for file '{}': {}",
-                file_path.display(),
-                e
+                "[ERROR] No tags in '{}', don't know what to search for. Skipping",
+                file_path.display()
             );
             return;
         }
     };
 
-    if !overwrite && tag.lyrics().next().is_some() {
+    let properties = tagged_file.properties();
+
+    let has_lyrics = search_tag.items().any(|item| {
+        matches!(item.key(), ItemKey::Lyrics) || format!("{:?}", item.key()).contains("Lyric")
+    });
+
+    if !overwrite && has_lyrics {
         println!(
-            "[INFO] File '{}' already has lyrics, skipping (use --overwrite to force)",
+            "[INFO] Lyrics already exist in '{}', skipping",
             file_path.display()
         );
         return;
     }
 
     for source in sources.iter() {
-        match source.fetch_lyrics(&tag, allow_inaccurate).await {
+        match source
+            .fetch_lyrics(&search_tag, properties, allow_inaccurate)
+            .await
+        {
             Ok(lyrics) => {
                 let lyrics = lyrics.trim();
                 if lyrics.is_empty() {
@@ -209,34 +230,71 @@ async fn process_file(
                 }
 
                 println!(
-                    "[INFO] Successfully fetched lyrics for file '{}' from source '{}'",
+                    "[INFO] Found lyrics for '{}' via '{}'",
                     file_path.display(),
                     source.name()
                 );
 
-                tag.remove_all_lyrics();
-                tag.remove_all_synchronised_lyrics();
+                let ext = file_path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
 
-                tag.add_frame(Lyrics {
-                    lang: "XXX".to_string(),
-                    description: format!("Fetched from {}", source.name()),
-                    text: lyrics.to_string(),
-                });
+                if ext == "mp3" {
+                    let mut mp3_tag =
+                        id3::Tag::read_from_path(&file_path).unwrap_or_else(|_| id3::Tag::new());
 
-                if let Err(e) = tag.write_to_path(file_path, Version::Id3v24) {
-                    eprintln!(
-                        "[ERROR] Failed to write tags into {}: {}",
-                        file_path.display(),
-                        e
-                    );
+                    mp3_tag.add_frame(id3::frame::Lyrics {
+                        lang: "XXX".to_string(),
+                        description: String::new(),
+                        text: lyrics.to_string(),
+                    });
+
+                    if let Err(e) = mp3_tag.write_to_path(&file_path, Version::Id3v24) {
+                        eprintln!(
+                            "[ERROR] Failed to save MP3 tag in {}: {}",
+                            file_path.display(),
+                            e
+                        );
+                    } else {
+                        println!(
+                            "[INFO] Successfully wrote lyrics for '{}' via id3 (MP3)",
+                            file_path.display()
+                        );
+                    }
+                } else {
+                    if tagged_file.primary_tag().is_none() {
+                        let tag_type = tagged_file.primary_tag_type();
+                        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+                    }
+
+                    let tag_to_save = tagged_file.primary_tag_mut().unwrap();
+
+                    tag_to_save.remove_key(ItemKey::Lyrics);
+                    tag_to_save.insert_text(ItemKey::Lyrics, lyrics.to_string());
+
+                    if let Err(e) = tag_to_save.save_to_path(&file_path, WriteOptions::default()) {
+                        eprintln!(
+                            "[ERROR] Failed to save tags in {}: {}",
+                            file_path.display(),
+                            e
+                        );
+                    } else {
+                        println!(
+                            "[INFO] Successfully wrote lyrics for '{}' via lofty ({})",
+                            file_path.display(),
+                            ext.to_uppercase()
+                        );
+                    }
                 }
                 break;
             }
             Err(e) => {
                 eprintln!(
-                    "[ERROR] Failed to fetch lyrics for file '{}' from source '{}': {}",
-                    file_path.display(),
+                    "[ERROR] Source '{}' error for '{}': {}",
                     source.name(),
+                    file_path.display(),
                     e
                 );
             }

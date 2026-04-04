@@ -2,7 +2,10 @@ use crate::sources::LyricsSource;
 
 use anyhow::{Context, Ok, Result, anyhow};
 use async_trait::async_trait;
-use id3::{Tag, TagLike};
+use lofty::{
+    properties::FileProperties,
+    tag::{Accessor, Tag},
+};
 use reqwest::Client;
 use scraper::{ElementRef, Html, Node, Selector};
 use serde::Deserialize;
@@ -66,13 +69,20 @@ impl LyricsSource for GeniusSource {
         "Genius"
     }
 
-    async fn fetch_lyrics(&self, tag: &Tag, allow_inaccurate: bool) -> Result<String> {
+    async fn fetch_lyrics(
+        &self,
+        tag: &Tag,
+        _properties: &FileProperties,
+        allow_inaccurate: bool,
+    ) -> Result<String> {
         let title = tag
             .title()
-            .ok_or_else(|| anyhow!("Missing track title in ID3 tag"))?;
+            .ok_or_else(|| anyhow!("Missing track title in ID3 tag"))?
+            .to_string();
         let artist = tag
             .artist()
-            .ok_or_else(|| anyhow!("Missing artist name in ID3 tag"))?;
+            .ok_or_else(|| anyhow!("Missing artist name in ID3 tag"))?
+            .to_string();
 
         let query = format!("{} {}", artist, title);
 

@@ -2,7 +2,10 @@ use crate::sources::LyricsSource;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use id3::{Tag, TagLike};
+use lofty::{
+    properties::FileProperties,
+    tag::{Accessor, Tag},
+};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
@@ -63,25 +66,32 @@ impl LyricsSource for LrcLibSource {
         "LrcLib"
     }
 
-    async fn fetch_lyrics(&self, tag: &Tag, allow_inaccurate: bool) -> Result<String> {
+    async fn fetch_lyrics(
+        &self,
+        tag: &Tag,
+        properties: &FileProperties,
+        allow_inaccurate: bool,
+    ) -> Result<String> {
         let base_url = "https://lrclib.net/api";
 
         let track_name = tag
             .title()
-            .ok_or_else(|| anyhow!("Missing track title in ID3 tag"))?;
+            .ok_or_else(|| anyhow!("Missing track title in ID3 tag"))?
+            .to_string();
         let artist_name = tag
             .artist()
-            .ok_or_else(|| anyhow!("Missing artist name in ID3 tag"))?;
-        let album_name = tag.album().unwrap_or_default();
-        let target_duration = tag.duration().unwrap_or_default() / 1000;
+            .ok_or_else(|| anyhow!("Missing artist name in ID3 tag"))?
+            .to_string();
+        let album_name = tag.album().unwrap_or_default().to_string();
+        let target_duration = properties.duration().as_secs() as u32;
 
         let mut get_req = self
             .client
             .get(format!("{base_url}/get"))
-            .query(&[("track_name", track_name), ("artist_name", artist_name)]);
+            .query(&[("track_name", &track_name), ("artist_name", &artist_name)]);
 
         if !album_name.is_empty() {
-            get_req = get_req.query(&[("album_name", album_name)]);
+            get_req = get_req.query(&[("album_name", &album_name)]);
         }
 
         if target_duration > 0 {
@@ -100,10 +110,10 @@ impl LyricsSource for LrcLibSource {
         let mut search_req = self
             .client
             .get(format!("{base_url}/search"))
-            .query(&[("track_name", track_name), ("artist_name", artist_name)]);
+            .query(&[("track_name", &track_name), ("artist_name", &artist_name)]);
 
         if !album_name.is_empty() {
-            search_req = search_req.query(&[("album_name", album_name)]);
+            search_req = search_req.query(&[("album_name", &album_name)]);
         }
 
         let response = search_req.send().await?;

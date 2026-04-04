@@ -21,7 +21,8 @@ anyhow = "1.0.102"
 itertools = "0.14.0"
 dotenv = "0.15.0"
 
-id3 = { version = "1.16.4", default-features = false, features = ["tokio"] }
+lofty = "0.23.3"
+id3 = "1.16.4"
 reqwest = { version = "0.13.2", default-features = false, features = [
     "rustls",
     "json",
