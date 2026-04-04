@@ -1,6 +1,6 @@
 use crate::sources::LyricsSource;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Ok, Result, anyhow};
 use async_trait::async_trait;
 use id3::{Tag, TagLike};
 use reqwest::Client;
@@ -116,7 +116,7 @@ impl LyricsSource for GeniusSource {
                 .first()
                 .ok_or_else(|| anyhow!("No results found on Genius"))?
         } else {
-            return Err(anyhow!("No accurate match found on Genius"));
+            return Ok("".to_string());
         };
 
         let lyrics_url = &selected.result.url;

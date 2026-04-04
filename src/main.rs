@@ -52,8 +52,6 @@ async fn main() -> Result<()> {
     let threads = args.threads;
     let overwrite = args.overwrite_existing;
     let allow_inaccurate = args.allow_inaccurate;
-    let lyrics_sources_raw = args.sources;
-    let extensions: Vec<String> = args.extensions.iter().map(|s| s.to_lowercase()).collect();
 
     if !music_dir_path.exists() {
         eprintln!("[ERROR] The specified music directory does not exist.");
@@ -65,19 +63,26 @@ async fn main() -> Result<()> {
         exit(1);
     }
 
-    if lyrics_sources_raw.is_empty() {
+    if args.sources.is_empty() {
         eprintln!("[ERROR] At least one source must be specified.");
         exit(1);
     }
 
-    if extensions.is_empty() {
+    if args.extensions.is_empty() {
         eprintln!("[ERROR] At least one file extension must be specified.");
         exit(1);
     }
 
-    let lyrics_sources_raw: Vec<String> = lyrics_sources_raw
-        .iter()
+    let lyrics_sources_raw: Vec<String> = args
+        .sources
+        .into_iter()
         .unique()
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    let extensions: Vec<String> = args
+        .extensions
+        .into_iter()
         .map(|s| s.to_lowercase())
         .collect();
 
@@ -106,35 +111,47 @@ async fn main() -> Result<()> {
     }
 
     let sources = Arc::new(sources);
-    let semaphone = Arc::new(Semaphore::new(threads));
+    let semaphore = Arc::new(Semaphore::new(threads));
     let mut entries = WalkDir::new(music_dir_path);
     let mut tasks = Vec::new();
 
     while let Some(entry) = entries.next().await {
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().await?.is_file()
-                    && extensions.contains(
-                        &entry
-                            .path()
-                            .extension()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_lowercase(),
-                    )
-                {
-                    let file_path = entry.path().to_path_buf();
-                    let semaphone_clone = Arc::clone(&semaphone);
-                    let sources_clone = Arc::clone(&sources);
-                    let task = tokio::spawn(async move {
-                        let _permit = semaphone_clone.acquire().await.unwrap();
-                        process_file(&file_path, sources_clone, overwrite, allow_inaccurate).await;
-                    });
-                    tasks.push(task);
-                }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[ERROR] Failed to read directory entry: {}", e);
+                continue;
             }
-            Err(e) => eprintln!("[ERROR] Failed to read directory entry: {}", e),
+        };
+
+        let is_file = entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_file())
+            .unwrap_or(false);
+        if !is_file {
+            continue;
         }
+
+        let ext = entry
+            .path()
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        if !extensions.contains(&ext) {
+            continue;
+        }
+
+        let file_path = entry.path().to_path_buf();
+        let semaphore_clone = Arc::clone(&semaphore);
+        let sources_clone = Arc::clone(&sources);
+
+        let task = tokio::spawn(async move {
+            let _permit = semaphore_clone.acquire().await.unwrap();
+            process_file(&file_path, sources_clone, overwrite, allow_inaccurate).await;
+        });
+        tasks.push(task);
     }
 
     for task in tasks {
@@ -150,72 +167,71 @@ async fn process_file(
     overwrite: bool,
     allow_inaccurate: bool,
 ) {
-    let tag = Tag::async_read_from_path(&file_path).await;
+    let mut tag = match Tag::async_read_from_path(file_path).await {
+        Ok(tag) => tag,
+        Err(e) => {
+            eprintln!(
+                "[ERROR] Failed to read ID3 tag for file '{}': {}",
+                file_path.display(),
+                e
+            );
+            return;
+        }
+    };
 
-    match tag {
-        Ok(tag) => {
-            let lyrics: Vec<&Lyrics> = tag.lyrics().collect();
-            if !lyrics.is_empty() && !overwrite {
-                println!(
-                    "[INFO] File '{}' already has lyrics, skipping (use --overwrite to force)",
-                    file_path.display()
-                );
-                return;
-            }
+    if !overwrite && tag.lyrics().next().is_some() {
+        println!(
+            "[INFO] File '{}' already has lyrics, skipping (use --overwrite to force)",
+            file_path.display()
+        );
+        return;
+    }
 
-            for source in sources.iter() {
-                match source.fetch_lyrics(&tag, allow_inaccurate).await {
-                    Ok(lyrics) => {
-                        let lyrics = lyrics.trim();
-                        if lyrics.is_empty() {
-                            println!(
-                                "[INFO] Source '{}' did not return any lyrics for file '{}'",
-                                source.name(),
-                                file_path.display()
-                            );
-                            continue;
-                        }
-
-                        println!(
-                            "[INFO] Successfully fetched lyrics for file '{}' from source '{}'",
-                            file_path.display(),
-                            source.name()
-                        );
-
-                        let mut tag = tag.clone();
-                        tag.remove_all_lyrics();
-                        tag.remove_all_synchronised_lyrics();
-
-                        tag.add_frame(Lyrics {
-                            lang: "XXX".to_string(),
-                            description: format!("Fetched from {}", source.name()),
-                            text: lyrics.to_string(),
-                        });
-
-                        tag.write_to_path(&file_path, Version::Id3v24)
-                            .map_err(|e| {
-                                eprintln!(
-                                    "[ERROR] Failed to write tags into {}: {}",
-                                    file_path.display(),
-                                    e
-                                );
-                            })
-                            .ok();
-                        break;
-                    }
-                    Err(e) => eprintln!(
-                        "[ERROR] Failed to fetch lyrics for file '{}' from source '{}': {}",
-                        file_path.display(),
+    for source in sources.iter() {
+        match source.fetch_lyrics(&tag, allow_inaccurate).await {
+            Ok(lyrics) => {
+                let lyrics = lyrics.trim();
+                if lyrics.is_empty() {
+                    println!(
+                        "[INFO] Source '{}' did not return any lyrics for file '{}'",
                         source.name(),
-                        e
-                    ),
+                        file_path.display()
+                    );
+                    continue;
                 }
+
+                println!(
+                    "[INFO] Successfully fetched lyrics for file '{}' from source '{}'",
+                    file_path.display(),
+                    source.name()
+                );
+
+                tag.remove_all_lyrics();
+                tag.remove_all_synchronised_lyrics();
+
+                tag.add_frame(Lyrics {
+                    lang: "XXX".to_string(),
+                    description: format!("Fetched from {}", source.name()),
+                    text: lyrics.to_string(),
+                });
+
+                if let Err(e) = tag.write_to_path(file_path, Version::Id3v24) {
+                    eprintln!(
+                        "[ERROR] Failed to write tags into {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                }
+                break;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[ERROR] Failed to fetch lyrics for file '{}' from source '{}': {}",
+                    file_path.display(),
+                    source.name(),
+                    e
+                );
             }
         }
-        Err(e) => eprintln!(
-            "[ERROR] Failed to read ID3 tag for file '{}': {}",
-            file_path.display(),
-            e
-        ),
     }
 }
