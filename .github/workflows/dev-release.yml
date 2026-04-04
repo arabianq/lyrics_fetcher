@@ -105,8 +105,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: "Development Build"
           body: |
-            Автоматическая сборка последней версии для тестирования.
-
             **Commit:** [${{ steps.release_info.outputs.commit }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
             **Date:** ${{ steps.release_info.outputs.date }}
           prerelease: true
