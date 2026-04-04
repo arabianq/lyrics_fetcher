@@ -1,7 +1,13 @@
 [package]
 name = "lyrics_fetcher"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["arabianq"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/arabianq/lyrics_fetcher"
+homepage = "https://github.com/arabianq/lyrics_fetcher"
+keywords = ["lyrics", "music", "audio", "lrclib", "genius"]
 
 [dependencies]
 tokio = { version = "1.51.0", features = ["full"] }
@@ -18,7 +24,7 @@ id3 = { version = "1.16.4", default-features = false, features = ["tokio"] }
 reqwest = { version = "0.13.2", default-features = false, features = [
     "rustls",
     "json",
-    "query"
+    "query",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 scraper = "0.26.0"
