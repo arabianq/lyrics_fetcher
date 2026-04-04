@@ -144,11 +144,12 @@ async fn main() -> Result<()> {
         }
 
         let file_path = entry.path().to_path_buf();
-        let semaphore_clone = Arc::clone(&semaphore);
         let sources_clone = Arc::clone(&sources);
 
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+
         let task = tokio::spawn(async move {
-            let _permit = semaphore_clone.acquire().await.unwrap();
+            let _permit = permit;
             process_file(&file_path, sources_clone, overwrite, allow_inaccurate).await;
         });
         tasks.push(task);
