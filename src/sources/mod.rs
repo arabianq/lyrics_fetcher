@@ -15,7 +15,6 @@ pub trait LyricsSource: Send + Sync {
     async fn fetch_lyrics(&self, tag: &Tag, allow_inaccurate: bool) -> Result<String>;
 }
 
-/// Фабрика для создания источников по их строковому названию
 pub async fn create_source(name: &str) -> Result<Arc<dyn LyricsSource>> {
     match name {
         "lrclib" => Ok(Arc::new(LrcLibSource::new().await?)),
