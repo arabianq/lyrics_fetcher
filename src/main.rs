@@ -23,18 +23,23 @@ struct Args {
     #[arg(required = true)]
     music_dir_path: PathBuf,
 
+    /// Number of concurrent threads to use
     #[arg(short, long, default_value_t = 1)]
     threads: usize,
 
+    /// Overwrite existing lyrics in audio files
     #[arg(short, long, default_value_t = false)]
     overwrite_existing: bool,
 
+    /// Allow inaccurate matches when searching
     #[arg(short, long, default_value_t = false)]
     allow_inaccurate: bool,
 
+    /// Comma-separated list of lyrics sources to query
     #[arg(short, long, default_value = "lrclib", value_delimiter = ',')]
     sources: Vec<String>,
 
+    /// Comma-separated list of file extensions to process
     #[arg(
         short,
         long,
