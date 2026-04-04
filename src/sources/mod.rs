@@ -17,8 +17,8 @@ pub trait LyricsSource: Send + Sync {
 
 pub async fn create_source(name: &str) -> Result<Arc<dyn LyricsSource>> {
     match name {
-        "lrclib" => Ok(Arc::new(LrcLibSource::new().await?)),
-        "genius" => Ok(Arc::new(GeniusSource::new().await?)),
+        "lrclib" => Ok(Arc::new(LrcLibSource::new().await?) as Arc<dyn LyricsSource>),
+        "genius" => Ok(Arc::new(GeniusSource::new().await?) as Arc<dyn LyricsSource>),
         _ => Err(anyhow!("Unknown source type: {}", name)),
     }
 }
