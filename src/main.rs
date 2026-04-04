@@ -46,6 +46,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv::dotenv()?;
+
     let args = Args::parse();
 
     let music_dir_path = args.music_dir_path;

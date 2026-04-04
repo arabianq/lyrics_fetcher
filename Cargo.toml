@@ -12,6 +12,7 @@ async-trait = "0.1.89"
 clap = { version = "4.6.0", features = ["derive"] }
 anyhow = "1.0.102"
 itertools = "0.14.0"
+dotenv = "0.15.0"
 
 id3 = { version = "1.16.4", default-features = false, features = ["tokio"] }
 reqwest = { version = "0.13.2", default-features = false, features = [
