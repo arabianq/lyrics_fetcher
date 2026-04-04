@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/arabianq/lyrics_fetcher"
 homepage = "https://github.com/arabianq/lyrics_fetcher"
 keywords = ["lyrics", "music", "audio", "lrclib", "genius"]
+description = "A Rust for fetching and embedding lyrics into audio files using multiple sources."
 
 [dependencies]
 tokio = { version = "1.51.0", features = ["full"] }
