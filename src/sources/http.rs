@@ -46,15 +46,13 @@ impl Http {
                 let query = query.replace('+', "%20");
                 request.url_mut().set_query(Some(&query));
             }
+            let betterlyrics = request.url().host_str() == Some("lyrics-api.boidu.dev");
             let mut response = self.client.execute(request).await?;
             let status = response.status();
-            if matches!(
-                status,
-                StatusCode::NOT_FOUND | StatusCode::GONE | StatusCode::FORBIDDEN
-            ) {
+            if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
                 return Ok(None);
             }
-            if status == StatusCode::UNAUTHORIZED {
+            if status == StatusCode::UNAUTHORIZED && betterlyrics {
                 return Err(Uncached.into());
             }
             if matches!(

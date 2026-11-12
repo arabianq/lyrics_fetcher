@@ -1,6 +1,6 @@
 use super::{LyricsSource, Track, http::Http};
 use crate::lyrics::Lyrics;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use scraper::{ElementRef, Html, Node, Selector};
 use serde::Deserialize;
@@ -35,9 +35,7 @@ struct Artist {
 }
 impl GeniusSource {
     pub fn new(http: Http) -> Result<Self> {
-        let key =
-            std::env::var("GENIUS_API_KEY").context("GENIUS_API_KEY is required for Genius")?;
-        anyhow::ensure!(!key.trim().is_empty(), "GENIUS_API_KEY is empty");
+        let key = std::env::var("GENIUS_API_KEY").unwrap_or_default();
         Ok(Self { key, http })
     }
 }
@@ -47,6 +45,10 @@ impl LyricsSource for GeniusSource {
         "genius"
     }
     async fn fetch(&self, track: &Track) -> Result<Option<Lyrics>> {
+        anyhow::ensure!(
+            !self.key.trim().is_empty(),
+            "GENIUS_API_KEY is required for Genius"
+        );
         let query = format!("{} {}", track.artist, track.title);
         let Some(search) = self
             .http

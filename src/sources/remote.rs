@@ -16,15 +16,18 @@ pub struct RemoteSource {
 }
 impl RemoteSource {
     pub fn new(kind: Kind, http: Http) -> Result<Self> {
-        let key = std::env::var("BETTERLYRICS_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                let mut v = reqwest::header::HeaderValue::from_str(&s)?;
-                v.set_sensitive(true);
-                Ok::<_, anyhow::Error>(v)
-            })
-            .transpose()?;
+        let key = if matches!(kind, Kind::Better) {
+            std::env::var("BETTERLYRICS_API_KEY").ok()
+        } else {
+            None
+        }
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let mut v = reqwest::header::HeaderValue::from_str(&s)?;
+            v.set_sensitive(true);
+            Ok::<_, anyhow::Error>(v)
+        })
+        .transpose()?;
         Ok(Self { kind, http, key })
     }
 }

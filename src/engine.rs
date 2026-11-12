@@ -265,9 +265,9 @@ fn pick(track: &Track, mut results: Vec<(usize, Found)>) -> Option<Found> {
         (
             plausible(track, lyrics),
             !lyrics.lines.is_empty(),
-            lyrics.duration.is_some() && track.duration > 0,
             std::cmp::Reverse(agreement[i] / band),
             lyrics.tier(),
+            lyrics.duration.is_some() && track.duration > 0,
             std::cmp::Reverse(*priority),
         )
     })?;
@@ -364,6 +364,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.source, "a");
+    }
+    #[test]
+    fn matching_word_sync_outranks_line_sync() {
+        let mut words = found("words", 1000, 180000);
+        words.lyrics.duration = None;
+        for line in &mut words.lyrics.lines {
+            line.words.push(crate::lyrics::Word {
+                start: line.start,
+                end: line.end,
+                text: line.text.clone(),
+            });
+        }
+        let picked = pick(
+            &track(),
+            vec![(0, found("lines", 1000, 180000)), (1, words)],
+        )
+        .unwrap();
+        assert_eq!(picked.source, "words");
     }
     #[tokio::test]
     async fn deduplicates_concurrent_tracks_and_supports_offline_cache() {

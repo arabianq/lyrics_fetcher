@@ -142,6 +142,12 @@ async fn main() -> Result<()> {
             "source 'none' cannot be combined with other sources"
         );
         for name in &args.sources {
+            if name == "genius" && !args.offline {
+                ensure!(
+                    std::env::var("GENIUS_API_KEY").is_ok_and(|key| !key.trim().is_empty()),
+                    "GENIUS_API_KEY is required for Genius"
+                );
+            }
             providers.push(sources::create_with_http(
                 name,
                 sources::http::Http::new(
@@ -262,6 +268,9 @@ async fn process(path: &Path, engine: &Engine, args: &Args) -> Result<Outcome> {
             _ => "plain",
         }
     );
+    if found.source == "unison" {
+        println!("[INFO] Lyrics from Unison (https://unison.boidu.dev)");
+    }
     if args.dry_run {
         return Ok(Outcome::Written);
     }

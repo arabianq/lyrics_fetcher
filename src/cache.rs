@@ -32,7 +32,11 @@ fn now() -> u64 {
 impl Cache {
     fn path(&self, provider: &str, track: &Track) -> Option<PathBuf> {
         let digest = Sha256::digest(serde_json::to_vec(&(provider, track)).ok()?);
-        Some(self.directory.as_ref()?.join(format!("{digest:x}.json")))
+        let hash = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Some(self.directory.as_ref()?.join(format!("v1-{hash}.json")))
     }
     pub fn load(&self, provider: &str, track: &Track) -> Option<Cached> {
         let mut data = Vec::new();
@@ -101,7 +105,15 @@ impl Cache {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
+            let owned = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("v1-"))
+                .and_then(|n| n.strip_suffix(".json"))
+                .is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                });
+            if !owned {
                 continue;
             }
             let meta = entry.metadata()?;
@@ -194,6 +206,28 @@ mod tests {
         assert!(cache.load("lrclib", &other).is_none());
         std::fs::write(cache.path("lrclib", &track).unwrap(), b"broken").unwrap();
         assert!(cache.load("lrclib", &track).is_none());
+    }
+    #[test]
+    fn pruning_never_removes_unrelated_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache {
+            directory: Some(dir.path().to_owned()),
+        };
+        cache.store("lrclib", &track(), None).unwrap();
+        let own = cache.path("lrclib", &track()).unwrap();
+        let unrelated = dir.path().join("report.json");
+        std::fs::write(&unrelated, b"{}").unwrap();
+        for path in [&own, &unrelated] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(91 * DAY))
+                .unwrap();
+        }
+        cache.prune().unwrap();
+        assert!(unrelated.exists());
+        assert!(!own.exists());
     }
     #[test]
     fn expired_misses_are_retried_and_sidecars_are_not_clobbered() {
