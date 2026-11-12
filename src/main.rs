@@ -1,51 +1,45 @@
+mod audio;
+mod cache;
+mod engine;
 mod lyrics;
 mod sources;
 
-use lofty::{
-    file::{AudioFile, TaggedFileExt},
-    tag::TagExt,
-};
-use sources::*;
-
-use anyhow::Result;
+use anyhow::{Context, Result, bail, ensure};
 use async_walkdir::WalkDir;
-use std::collections::HashSet;
-
+use audio::LyricsFormat;
+use cache::Cache;
+use clap::Parser;
+use engine::Engine;
 use futures::StreamExt;
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    process::exit,
     sync::Arc,
+    time::Duration,
 };
-use tokio::sync::Semaphore;
-
-use clap::Parser;
-
-use id3::{TagLike, Version};
-use lofty::{config::WriteOptions, tag::ItemKey};
+use tokio::task::JoinSet;
 
 #[derive(Parser)]
+#[command(
+    version,
+    about = "Fetch and embed plain, line-synced and word-synced lyrics"
+)]
 struct Args {
-    #[arg(required = true)]
+    /// Root directory of the music library
     music_dir_path: PathBuf,
-
-    /// Number of concurrent threads to use
-    #[arg(short, long, default_value_t = 1)]
-    threads: usize,
-
-    /// Overwrite existing lyrics in audio files
-    #[arg(short, long, default_value_t = false)]
+    /// Number of files processed concurrently
+    #[arg(short,long,default_value_t=1,value_parser=clap::value_parser!(u16).range(1..=256))]
+    threads: u16,
+    /// Replace existing embedded lyrics and sidecars
+    #[arg(short, long)]
     overwrite_existing: bool,
-
-    /// Allow inaccurate matches when searching
-    #[arg(short, long, default_value_t = false)]
+    /// Permit approximate track and duration matches
+    #[arg(short, long)]
     allow_inaccurate: bool,
-
-    /// Comma-separated list of lyrics sources to query
-    #[arg(short, long, default_value = DEFAULT_SOURCES, value_delimiter = ',')]
+    /// Providers in priority order; use "none" for local sidecars only
+    #[arg(short,long,default_value=sources::DEFAULT_SOURCES,value_delimiter=',')]
     sources: Vec<String>,
-
-    /// Comma-separated list of file extensions to process
+    /// File extensions to process
     #[arg(
         short,
         long,
@@ -53,289 +47,268 @@ struct Args {
         value_delimiter = ','
     )]
     extensions: Vec<String>,
+    /// Embedded format: auto keeps word timing, lrc keeps line timing
+    #[arg(long,value_enum,default_value_t=LyricsFormat::Auto)]
+    lyrics_format: LyricsFormat,
+    /// Also save an enhanced .lrc next to the audio file
+    #[arg(long)]
+    sidecar: bool,
+    /// Use local sidecars and disk cache without network requests
+    #[arg(long)]
+    offline: bool,
+    /// Disable disk cache
+    #[arg(long, conflicts_with = "cache_dir")]
+    no_cache: bool,
+    /// Override the platform cache directory
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Minimum milliseconds between HTTP requests to each provider
+    #[arg(long,default_value_t=500,value_parser=clap::value_parser!(u64).range(0..=10000))]
+    request_interval: u64,
+    /// Search and report results without modifying audio or sidecars
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Default)]
+struct Summary {
+    written: usize,
+    skipped: usize,
+    missing: usize,
+    instrumental: usize,
+    failed: usize,
+}
+enum Outcome {
+    Written,
+    Skipped,
+    Missing,
+    Instrumental,
+}
+impl Summary {
+    fn record(&mut self, result: Result<(PathBuf, Result<Outcome>), tokio::task::JoinError>) {
+        match result {
+            Ok((_, Ok(Outcome::Written))) => self.written += 1,
+            Ok((_, Ok(Outcome::Skipped))) => self.skipped += 1,
+            Ok((_, Ok(Outcome::Missing))) => self.missing += 1,
+            Ok((_, Ok(Outcome::Instrumental))) => self.instrumental += 1,
+            Ok((path, Err(e))) => {
+                self.failed += 1;
+                eprintln!("[ERROR] '{}': {e:#}", path.display());
+            }
+            Err(e) => {
+                self.failed += 1;
+                eprintln!("[ERROR] Worker failed: {e}");
+            }
+        }
+    }
+}
+fn normalize(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect()
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-
-    let args = Args::parse();
-
-    let music_dir_path = args.music_dir_path;
-    let threads = args.threads;
-    let overwrite = args.overwrite_existing;
-    let allow_inaccurate = args.allow_inaccurate;
-
-    if !music_dir_path.exists() {
-        eprintln!("[ERROR] The specified music directory does not exist.");
-        exit(1);
-    }
-
-    if threads < 1 {
-        eprintln!("[ERROR] The number of threads must be at least 1.");
-        exit(1);
-    }
-
-    if args.sources.is_empty() {
-        eprintln!("[ERROR] At least one source must be specified.");
-        exit(1);
-    }
-
-    if args.extensions.is_empty() {
-        eprintln!("[ERROR] At least one file extension must be specified.");
-        exit(1);
-    }
-
-    let mut seen = HashSet::new();
-    let lyrics_sources_raw: Vec<String> = args
-        .sources
+    let mut args = Args::parse();
+    ensure!(
+        args.music_dir_path.is_dir(),
+        "music directory does not exist or is not a directory"
+    );
+    args.sources = normalize(args.sources);
+    args.extensions = normalize(args.extensions)
         .into_iter()
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| seen.insert(s.clone()))
+        .map(|s| s.trim_start_matches('.').to_owned())
+        .filter(|s| !s.is_empty())
         .collect();
-
-    let extensions: Vec<String> = args
-        .extensions
-        .into_iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-
-    println!("[INFO] Music directory: {}", music_dir_path.display());
-    println!("[INFO] Number of threads: {}", threads);
-    println!("[INFO] Sources: {}", lyrics_sources_raw.join(", "));
-
-    let mut sources: Vec<Arc<dyn LyricsSource>> = vec![];
-    for source_name in lyrics_sources_raw {
-        let source_name = source_name.trim().to_lowercase();
-
-        match create_source(&source_name).await {
-            Ok(source) => sources.push(source),
-            Err(e) => {
-                eprintln!(
-                    "[WARNING] Failed to initialize source '{}', skipping: {}",
-                    source_name, e
-                );
-            }
+    ensure!(
+        !args.sources.is_empty(),
+        "at least one source is required; use --sources none for local sidecars"
+    );
+    ensure!(
+        !args.extensions.is_empty(),
+        "at least one extension is required"
+    );
+    let client = sources::client()?;
+    let mut providers = Vec::new();
+    if args.sources == ["none"] {
+    } else {
+        ensure!(
+            !args.sources.iter().any(|s| s == "none"),
+            "source 'none' cannot be combined with other sources"
+        );
+        for name in &args.sources {
+            providers.push(sources::create_with_http(
+                name,
+                sources::http::Http::new(
+                    client.clone(),
+                    Duration::from_millis(args.request_interval),
+                ),
+            )?);
         }
     }
-
-    if sources.is_empty() {
-        eprintln!("[ERROR] No valid sources were initialized. Exiting.");
-        exit(1);
+    let cache = Cache {
+        directory: if args.no_cache {
+            None
+        } else {
+            args.cache_dir.clone().or_else(cache::default_directory)
+        },
+    };
+    let pruning = cache.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || pruning.prune()).await? {
+        eprintln!("[WARNING] Cache cleanup failed: {e:#}");
     }
-
-    let sources = Arc::new(sources);
-    let semaphore = Arc::new(Semaphore::new(threads));
-    let mut entries = WalkDir::new(music_dir_path);
-    let mut tasks = Vec::new();
-
+    let engine = Arc::new(Engine::new(providers, cache, args.offline));
+    println!(
+        "[INFO] Directory: {}; concurrent files: {}; sources: {}",
+        args.music_dir_path.display(),
+        args.threads,
+        args.sources.join(", ")
+    );
+    let args = Arc::new(args);
+    let mut entries = WalkDir::new(&args.music_dir_path);
+    let mut jobs = JoinSet::new();
+    let mut summary = Summary::default();
     while let Some(entry) = entries.next().await {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("[ERROR] Failed to read directory entry: {}", e);
+                summary.failed += 1;
+                eprintln!("[ERROR] Directory traversal: {e}");
                 continue;
             }
         };
-
-        let is_file = entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false);
-        if !is_file {
-            continue;
-        }
-
-        let ext = entry
-            .path()
+        match entry.file_type().await {
+            Ok(t) if t.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                summary.failed += 1;
+                eprintln!("[ERROR] '{}': {e}", entry.path().display());
+                continue;
+            }
+        };
+        let path = entry.path().to_owned();
+        let ext = path
             .extension()
             .unwrap_or_default()
             .to_string_lossy()
             .to_lowercase();
-        if !extensions.contains(&ext) {
+        if !args.extensions.contains(&ext) {
             continue;
         }
-
-        let file_path = entry.path().to_path_buf();
-        let sources_clone = Arc::clone(&sources);
-
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-
-        let task = tokio::spawn(async move {
-            let _permit = permit;
-            process_file(&file_path, sources_clone, overwrite, allow_inaccurate).await;
+        while jobs.len() >= usize::from(args.threads) {
+            if let Some(result) = jobs.join_next().await {
+                summary.record(result)
+            }
+        }
+        let engine = engine.clone();
+        let args = args.clone();
+        jobs.spawn(async move {
+            let result = process(&path, &engine, &args).await;
+            (path, result)
         });
-        tasks.push(task);
     }
-
-    for task in tasks {
-        let _ = task.await;
+    while let Some(result) = jobs.join_next().await {
+        summary.record(result)
     }
-
+    println!(
+        "[INFO] {}: {}; skipped: {}; not found: {}; instrumental: {}; failed: {}",
+        if args.dry_run {
+            "Found (dry run)"
+        } else {
+            "Written"
+        },
+        summary.written,
+        summary.skipped,
+        summary.missing,
+        summary.instrumental,
+        summary.failed
+    );
+    if summary.failed > 0 {
+        bail!("{} file(s) or directory entries failed", summary.failed)
+    }
     Ok(())
 }
 
-async fn process_file(
-    file_path: &Path,
-    sources: Arc<Vec<Arc<dyn LyricsSource>>>,
-    overwrite: bool,
-    allow_inaccurate: bool,
-) {
-    let mut tagged_file = match lofty::read_from_path(&file_path) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("[ERROR] Failed to read '{}': {}", file_path.display(), e);
-            return;
-        }
-    };
-
-    let search_tag = match tagged_file.primary_tag().or(tagged_file.first_tag()) {
-        Some(t) => t.clone(),
-        None => {
-            eprintln!(
-                "[ERROR] No tags in '{}', don't know what to search for. Skipping",
-                file_path.display()
-            );
-            return;
-        }
-    };
-
-    let properties = tagged_file.properties();
-
-    let has_lyrics = search_tag.items().any(|item| {
-        matches!(item.key(), ItemKey::Lyrics) || format!("{:?}", item.key()).contains("Lyric")
-    });
-
-    if !overwrite && has_lyrics {
-        println!(
-            "[INFO] Lyrics already exist in '{}', skipping",
-            file_path.display()
-        );
-        return;
+async fn process(path: &Path, engine: &Engine, args: &Args) -> Result<Outcome> {
+    let read_path = path.to_owned();
+    let inaccurate = args.allow_inaccurate;
+    let info =
+        tokio::task::spawn_blocking(move || audio::inspect(&read_path, inaccurate)).await??;
+    if info.has_lyrics && !args.overwrite_existing {
+        println!("[INFO] Existing lyrics, skipping '{}'", path.display());
+        return Ok(Outcome::Skipped);
     }
-
-    for source in sources.iter() {
-        match source
-            .fetch_lyrics(&search_tag, properties, allow_inaccurate)
-            .await
-        {
-            Ok(lyrics) => {
-                let lyrics = lyrics.trim();
-                if lyrics.is_empty() {
-                    println!(
-                        "[INFO] Source '{}' did not return any lyrics for file '{}'",
-                        source.name(),
-                        file_path.display()
-                    );
-                    continue;
-                }
-
-                println!(
-                    "[INFO] Found lyrics for '{}' via '{}'",
-                    file_path.display(),
-                    source.name()
-                );
-
-                let ext = file_path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase();
-
-                if ext == "mp3" {
-                    let mut mp3_tag = match id3::Tag::read_from_path(file_path) {
-                        Ok(tag) => tag,
-                        Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => id3::Tag::new(),
-                        Err(e) => {
-                            eprintln!(
-                                "[ERROR] Refusing to replace unreadable MP3 tags in '{}': {}",
-                                file_path.display(),
-                                e
-                            );
-                            return;
-                        }
-                    };
-                    replace_mp3_lyrics(&mut mp3_tag, lyrics);
-
-                    if let Err(e) = mp3_tag.write_to_path(&file_path, Version::Id3v24) {
-                        eprintln!(
-                            "[ERROR] Failed to save MP3 tag in {}: {}",
-                            file_path.display(),
-                            e
-                        );
-                    } else {
-                        println!(
-                            "[INFO] Successfully wrote lyrics for '{}' via id3 (MP3)",
-                            file_path.display()
-                        );
-                    }
-                } else {
-                    if tagged_file.primary_tag().is_none() {
-                        let tag_type = tagged_file.primary_tag_type();
-                        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
-                    }
-
-                    let tag_to_save = tagged_file.primary_tag_mut().unwrap();
-
-                    tag_to_save.remove_key(ItemKey::Lyrics);
-                    tag_to_save.insert_text(ItemKey::Lyrics, lyrics.to_string());
-
-                    if let Err(e) = tag_to_save.save_to_path(&file_path, WriteOptions::default()) {
-                        eprintln!(
-                            "[ERROR] Failed to save tags in {}: {}",
-                            file_path.display(),
-                            e
-                        );
-                    } else {
-                        println!(
-                            "[INFO] Successfully wrote lyrics for '{}' via lofty ({})",
-                            file_path.display(),
-                            ext.to_uppercase()
-                        );
-                    }
-                }
-                break;
-            }
-            Err(e) => {
-                eprintln!(
-                    "[ERROR] Source '{}' error for '{}': {}",
-                    source.name(),
-                    file_path.display(),
-                    e
-                );
-            }
-        }
+    let Some(found) = engine.lookup(&info.track, path).await? else {
+        println!("[INFO] No lyrics: '{}'", path.display());
+        return Ok(Outcome::Missing);
+    };
+    if found.lyrics.instrumental {
+        println!("[INFO] Instrumental: '{}'", path.display());
+        return Ok(Outcome::Instrumental);
     }
-}
-
-fn replace_mp3_lyrics(tag: &mut id3::Tag, lyrics: &str) {
-    tag.remove("USLT");
-    tag.remove("SYLT");
-    tag.add_frame(id3::frame::Lyrics {
-        lang: "und".into(),
-        description: String::new(),
-        text: lyrics.to_owned(),
-    });
+    println!(
+        "[INFO] '{}' via {}{} ({})",
+        path.display(),
+        found.source,
+        if found.cached { " cache" } else { "" },
+        match found.lyrics.tier() {
+            2 => "word sync",
+            1 => "line sync",
+            _ => "plain",
+        }
+    );
+    if args.dry_run {
+        return Ok(Outcome::Written);
+    }
+    let write_path = path.to_owned();
+    let format = args.lyrics_format;
+    let sidecar = args.sidecar;
+    let overwrite = args.overwrite_existing;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let lrc = write_path.with_extension("lrc");
+        let write_sidecar = sidecar && (found.source != "local" || !lrc.exists());
+        if write_sidecar && lrc.exists() && !overwrite {
+            bail!(
+                "sidecar '{}' already exists; use --overwrite-existing to replace it",
+                lrc.display()
+            )
+        }
+        audio::save(&write_path, &info.snapshot, &found.lyrics, format)
+            .context("failed to save audio lyrics")?;
+        if write_sidecar {
+            cache::atomic_write(&lrc, found.lyrics.lrc(true).as_bytes(), overwrite)
+                .context("audio saved, but sidecar write failed")?;
+        }
+        Ok(())
+    })
+    .await??;
+    Ok(Outcome::Written)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn overwrite_removes_all_languages_and_preserves_other_metadata() {
-        let mut tag = id3::Tag::new();
-        tag.set_title("title");
-        for lang in ["eng", "rus"] {
-            tag.add_frame(id3::frame::Lyrics {
-                lang: lang.into(),
-                description: String::new(),
-                text: "old".into(),
-            });
-        }
-        replace_mp3_lyrics(&mut tag, "new");
-        assert_eq!(tag.lyrics().count(), 1);
-        assert_eq!(tag.lyrics().next().unwrap().text, "new");
-        assert_eq!(tag.title(), Some("title"));
+    fn validates_cli_and_normalizes_sources_before_deduplication() {
+        assert_eq!(
+            normalize(vec!["LRCLIB".into(), " lrclib ".into()]),
+            ["lrclib"]
+        );
+        assert!(Args::try_parse_from(["lyrics_fetcher", "/tmp", "--threads", "0"]).is_err());
+        assert!(
+            Args::try_parse_from([
+                "lyrics_fetcher",
+                "/tmp",
+                "--no-cache",
+                "--cache-dir",
+                "/tmp"
+            ])
+            .is_err()
+        );
     }
 }

@@ -161,12 +161,15 @@ impl LyricsSource for YoutubeSource {
 }
 fn decode(rows: &[&Value]) -> Result<Lyrics> {
     ensure!(rows.len() <= MAX_LINES, "too many YouTube lyrics lines");
-    let mut lyrics = Lyrics::default();
-    lyrics.plain = rows
+    let plain = rows
         .iter()
         .map(|v| text(v, "lyricLine"))
         .collect::<Vec<_>>()
         .join("\n");
+    let mut lyrics = Lyrics {
+        plain,
+        ..Lyrics::default()
+    };
     for row in rows {
         let start = text(row, "cueRange.startTimeMilliseconds").parse::<u64>();
         let end = text(row, "cueRange.endTimeMilliseconds").parse::<u64>();

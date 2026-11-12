@@ -120,7 +120,7 @@ mod tests {
             ] {
                 let (mut conn, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 1024];
-                conn.read(&mut buf).await.unwrap();
+                assert!(conn.read(&mut buf).await.unwrap() > 0);
                 conn.write_all(response.as_bytes()).await.unwrap();
             }
         });

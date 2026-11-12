@@ -101,7 +101,7 @@ impl LyricsSource for GeniusSource {
     }
 }
 fn extract(page_html: &str, title: &str) -> Result<String> {
-    let document = Html::parse_document(&page_html);
+    let document = Html::parse_document(page_html);
     let selector = Selector::parse(r#"div[data-lyrics-container="true"]"#)
         .map_err(|_| anyhow!("Failed to create CSS selector for lyrics extraction"))?;
 

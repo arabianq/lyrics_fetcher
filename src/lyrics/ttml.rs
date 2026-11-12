@@ -54,6 +54,7 @@ pub fn parse(data: &[u8]) -> Result<Lyrics> {
             p.ancestors().any(|n| n.has_tag_name("body")),
             "TTML paragraph outside body"
         );
+        timing(p)?;
         let mut parts: Vec<Line> = Vec::new();
         for node in p
             .descendants()
@@ -90,6 +91,13 @@ pub fn parse(data: &[u8]) -> Result<Lyrics> {
                 .find(|n| n.has_tag_name("span") && attr(*n, "begin").is_some());
             let (start, end) = timing(timed_span.unwrap_or(p))?;
             let line = &mut parts[index];
+            if timed_span.is_none() && text.trim().is_empty() {
+                if let Some(last) = line.words.last_mut() {
+                    last.text.push_str(&text);
+                    line.text.push_str(&text);
+                }
+                continue;
+            }
             if line.text.is_empty() {
                 line.start = start;
             }
@@ -142,6 +150,12 @@ mod tests {
         assert_eq!(l.lines[0].words[1].start, 2000);
         assert!(l.lines[1].background);
         assert!(!l.plain.contains("translated"));
+    }
+    #[test]
+    fn whitespace_between_spans_keeps_word_sync() {
+        let lyrics = parse(b"<tt><body><p begin='1s' end='3s'>\n  <span begin='1s' end='2s'>Hello</span> <span begin='2s' end='3s'>world</span>\n</p></body></tt>").unwrap();
+        assert_eq!(lyrics.lines[0].text, "Hello world");
+        assert_eq!(lyrics.lines[0].words.len(), 2);
     }
     #[test]
     fn rejects_invalid_xml_and_times() {

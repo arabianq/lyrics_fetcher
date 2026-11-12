@@ -95,19 +95,6 @@ impl Track {
 pub trait LyricsSource: Send + Sync {
     fn name(&self) -> &'static str;
     async fn fetch(&self, track: &Track) -> Result<Option<Lyrics>>;
-    async fn fetch_lyrics(
-        &self,
-        tag: &Tag,
-        properties: &FileProperties,
-        allow_inaccurate: bool,
-    ) -> Result<String> {
-        let track = Track::from_tags(tag, properties, allow_inaccurate)?;
-        Ok(self
-            .fetch(&track)
-            .await?
-            .map(|l| l.lrc(true))
-            .unwrap_or_default())
-    }
 }
 
 pub fn client() -> Result<reqwest::Client> {
@@ -124,10 +111,6 @@ pub fn client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?)
-}
-
-pub async fn create_source(name: &str) -> Result<Arc<dyn LyricsSource>> {
-    create_with_http(name, http::Http::new(client()?, Duration::from_millis(500)))
 }
 
 pub fn create_with_http(name: &str, http: http::Http) -> Result<Arc<dyn LyricsSource>> {
