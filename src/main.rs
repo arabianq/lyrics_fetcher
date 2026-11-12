@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod lyrics;
 mod sources;
 
@@ -43,7 +42,7 @@ struct Args {
     allow_inaccurate: bool,
 
     /// Comma-separated list of lyrics sources to query
-    #[arg(short, long, default_value = "lrclib", value_delimiter = ',')]
+    #[arg(short, long, default_value = DEFAULT_SOURCES, value_delimiter = ',')]
     sources: Vec<String>,
 
     /// Comma-separated list of file extensions to process
