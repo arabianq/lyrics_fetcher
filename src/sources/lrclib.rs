@@ -53,6 +53,8 @@ impl LrcLibSource {
                 version = env!("CARGO_PKG_VERSION"),
                 repo_url = env!("CARGO_PKG_REPOSITORY")
             ))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .context("Failed to build HTTP client for LrcLib")?;
 
@@ -124,40 +126,15 @@ impl LyricsSource for LrcLibSource {
             let artist_name_lower = artist_name.to_lowercase();
             let album_name_lower = album_name.to_lowercase();
 
-            let best_match = data
-                .iter()
-                .find(|item| {
-                    item.track_name.to_lowercase() == track_name_lower
-                        && item.artist_name.to_lowercase() == artist_name_lower
-                        && item.album_name.to_lowercase() == album_name_lower
-                        && item
-                            .duration
-                            .map_or(false, |d| (d.round() as u32).abs_diff(target_duration) <= 2)
-                })
-                .or_else(|| {
-                    data.iter().find(|item| {
-                        item.track_name.to_lowercase() == track_name_lower
-                            && item.artist_name.to_lowercase() == artist_name_lower
-                            && item.album_name.to_lowercase() == album_name_lower
-                    })
-                })
-                .or_else(|| {
-                    data.iter().find(|item| {
-                        item.track_name.to_lowercase() == track_name_lower
-                            && item.artist_name.to_lowercase() == artist_name_lower
-                    })
-                });
-
-            if let Some(best) = best_match {
-                if let Some(lyrics) = best.extract_lyrics() {
-                    return Ok(lyrics);
-                }
-            } else if allow_inaccurate {
-                if let Some(first) = data.first() {
-                    if let Some(lyrics) = first.extract_lyrics() {
-                        return Ok(lyrics);
-                    }
-                }
+            if let Some(best) = select_record(
+                &data,
+                &track_name_lower,
+                &artist_name_lower,
+                &album_name_lower,
+                target_duration,
+                allow_inaccurate,
+            ) {
+                return Ok(best.extract_lyrics().unwrap());
             }
         } else {
             return Err(anyhow!(
@@ -168,5 +145,85 @@ impl LyricsSource for LrcLibSource {
         }
 
         Ok("".to_string())
+    }
+}
+
+fn select_record<'a>(
+    records: &'a [LrcLibGetResponse],
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration: u32,
+    allow_inaccurate: bool,
+) -> Option<&'a LrcLibGetResponse> {
+    records
+        .iter()
+        .filter(|item| item.extract_lyrics().is_some())
+        .filter(|item| {
+            allow_inaccurate
+                || (item.track_name.to_lowercase() == title
+                    && item.artist_name.to_lowercase() == artist
+                    && (duration == 0
+                        || item
+                            .duration
+                            .is_some_and(|d| (d - f64::from(duration)).abs() <= 8.0)))
+        })
+        .min_by_key(|item| {
+            (
+                item.track_name.to_lowercase() != title
+                    || item.artist_name.to_lowercase() != artist,
+                item.synced_lyrics
+                    .as_ref()
+                    .is_none_or(|s| s.trim().is_empty()),
+                item.duration
+                    .map_or(u32::MAX, |d| (d.round() as u32).abs_diff(duration)),
+                item.album_name.to_lowercase() != album,
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn record(text: Option<&str>, duration: f64) -> LrcLibGetResponse {
+        LrcLibGetResponse {
+            _id: 1,
+            track_name: "song".into(),
+            artist_name: "artist".into(),
+            album_name: "album".into(),
+            duration: Some(duration),
+            _instrumental: false,
+            plain_lyrics: text.map(str::to_owned),
+            synced_lyrics: None,
+        }
+    }
+    #[test]
+    fn empty_candidate_does_not_hide_lyrics() {
+        let records = [record(None, 180.0), record(Some("text"), 180.0)];
+        assert_eq!(
+            select_record(&records, "song", "artist", "album", 180, false)
+                .unwrap()
+                .extract_lyrics()
+                .as_deref(),
+            Some("text")
+        );
+    }
+    #[test]
+    fn strict_matching_rejects_another_cut() {
+        let records = [record(Some("text"), 210.0)];
+        assert!(select_record(&records, "song", "artist", "album", 180, false).is_none());
+        assert!(select_record(&records, "song", "artist", "album", 180, true).is_some());
+    }
+    #[test]
+    fn synced_candidate_outranks_plain() {
+        let mut synced = record(None, 181.0);
+        synced.synced_lyrics = Some("[00:01.00]text".into());
+        let records = [record(Some("plain"), 180.0), synced];
+        assert!(
+            select_record(&records, "song", "artist", "album", 180, false)
+                .unwrap()
+                .synced_lyrics
+                .is_some()
+        );
     }
 }

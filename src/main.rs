@@ -242,14 +242,19 @@ async fn process_file(
                     .to_lowercase();
 
                 if ext == "mp3" {
-                    let mut mp3_tag =
-                        id3::Tag::read_from_path(&file_path).unwrap_or_else(|_| id3::Tag::new());
-
-                    mp3_tag.add_frame(id3::frame::Lyrics {
-                        lang: "XXX".to_string(),
-                        description: String::new(),
-                        text: lyrics.to_string(),
-                    });
+                    let mut mp3_tag = match id3::Tag::read_from_path(file_path) {
+                        Ok(tag) => tag,
+                        Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => id3::Tag::new(),
+                        Err(e) => {
+                            eprintln!(
+                                "[ERROR] Refusing to replace unreadable MP3 tags in '{}': {}",
+                                file_path.display(),
+                                e
+                            );
+                            return;
+                        }
+                    };
+                    replace_mp3_lyrics(&mut mp3_tag, lyrics);
 
                     if let Err(e) = mp3_tag.write_to_path(&file_path, Version::Id3v24) {
                         eprintln!(
@@ -299,5 +304,36 @@ async fn process_file(
                 );
             }
         }
+    }
+}
+
+fn replace_mp3_lyrics(tag: &mut id3::Tag, lyrics: &str) {
+    tag.remove("USLT");
+    tag.remove("SYLT");
+    tag.add_frame(id3::frame::Lyrics {
+        lang: "und".into(),
+        description: String::new(),
+        text: lyrics.to_owned(),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn overwrite_removes_all_languages_and_preserves_other_metadata() {
+        let mut tag = id3::Tag::new();
+        tag.set_title("title");
+        for lang in ["eng", "rus"] {
+            tag.add_frame(id3::frame::Lyrics {
+                lang: lang.into(),
+                description: String::new(),
+                text: "old".into(),
+            });
+        }
+        replace_mp3_lyrics(&mut tag, "new");
+        assert_eq!(tag.lyrics().count(), 1);
+        assert_eq!(tag.lyrics().next().unwrap().text, "new");
+        assert_eq!(tag.title(), Some("title"));
     }
 }

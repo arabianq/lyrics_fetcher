@@ -56,6 +56,8 @@ impl GeniusSource {
                 version = env!("CARGO_PKG_VERSION"),
                 repo_url = env!("CARGO_PKG_REPOSITORY")
             ))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .context("Failed to build HTTP client for Genius")?;
 
@@ -123,7 +125,8 @@ impl LyricsSource for GeniusSource {
         } else if allow_inaccurate {
             data.response
                 .hits
-                .first()
+                .iter()
+                .find(|hit| hit.hit_type == "song")
                 .ok_or_else(|| anyhow!("No results found on Genius"))?
         } else {
             return Ok("".to_string());
@@ -131,7 +134,14 @@ impl LyricsSource for GeniusSource {
 
         let lyrics_url = &selected.result.url;
 
-        let page_html = self.client.get(lyrics_url).send().await?.text().await?;
+        let page_html = self
+            .client
+            .get(lyrics_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
 
         let document = Html::parse_document(&page_html);
         let selector = Selector::parse(r#"div[data-lyrics-container="true"]"#)
