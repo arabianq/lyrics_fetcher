@@ -8,7 +8,7 @@ use sources::*;
 
 use anyhow::Result;
 use async_walkdir::WalkDir;
-use itertools::Itertools;
+use std::collections::HashSet;
 
 use futures::StreamExt;
 use std::{
@@ -56,7 +56,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let args = Args::parse();
 
@@ -85,11 +85,12 @@ async fn main() -> Result<()> {
         exit(1);
     }
 
+    let mut seen = HashSet::new();
     let lyrics_sources_raw: Vec<String> = args
         .sources
         .into_iter()
-        .unique()
-        .map(|s| s.to_lowercase())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| seen.insert(s.clone()))
         .collect();
 
     let extensions: Vec<String> = args
